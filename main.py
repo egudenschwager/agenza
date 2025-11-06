@@ -1,10 +1,10 @@
-# main.py
+import requests # <-- Librería para hacer peticiones HTTP a la API de WATI
 from fastapi import FastAPI, Request, HTTPException
 import json
 import os
 from datetime import datetime, date 
 
-# Importaciones de las funciones de la BD
+# Importaciones de las funciones de la BD (de db_service.py)
 from db_service import consultar_disponibilidad, reservar_cita, buscar_citas_pendientes, cancelar_cita 
 
 app = FastAPI()
@@ -12,33 +12,64 @@ app = FastAPI()
 # --- CONFIGURACIÓN PARA EL PILOTO ---
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "AGZ_TOKEN_DE_PRUEBA_123") 
 MEDICO_PILOTO_ID = 1 
-user_sessions = {} 
+user_sessions = {} # Almacenamiento de estado de sesión (para el diálogo)
 
 
-# --- FUNCIÓN AUXILIAR DE RESPUESTA (Simulación del BSP) ---
+# --- FUNCIÓN DE ENVÍO REAL A WATI ---
 def send_whatsapp_message(recipient_number, message_text):
-    """Simula el envío de un mensaje de vuelta a WhatsApp."""
-    print(f"\n>>>> RESPUESTA A {recipient_number}:\n{message_text}\n<<<<\n")
+    """
+    Función REAL: Envía el mensaje al usuario a través de la API de WATI.
+    Utiliza las credenciales configuradas en Railway.
+    """
+    # Credenciales leídas desde las variables de entorno de Railway
+    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT")
+    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
+    
+    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN:
+        # Esto debería haber sido configurado en Railway
+        print("ERROR: Credenciales de WATI no configuradas. No se pudo enviar el mensaje.")
+        return
 
-
-# --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (Adaptada para Simulación) ---
-def extract_message_info(data):
-    """Intenta extraer el número del remitente y el texto del mensaje entrante de la data de WATI/Meta."""
+    # WATI usa el endpoint /api/v1/sendSessionMessage
+    send_message_url = f"{WATI_BASE_ENDPOINT}/api/v1/sendSessionMessage"
+    
+    headers = {
+        "Authorization": WATI_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    # WATI a menudo requiere el número sin el '+'
+    # El recipient_number de WATI viene sin el '+', pero si viniera con, lo limpiamos
+    number_to_send = recipient_number.replace('+', '')
+    
+    payload = {
+        "whatsappNumber": number_to_send,
+        "messageText": message_text
+    }
+    
     try:
-        # Busca el evento de mensaje en la estructura de Meta/WATI
+        # Envío POST a la API de WATI
+        response = requests.post(send_message_url, headers=headers, json=payload)
+        response.raise_for_status() # Lanza una excepción para errores 4xx/5xx
+        print(f"ÉXITO API WATI: Mensaje enviado a {recipient_number}. Código: {response.status_code}")
+        
+    except requests.exceptions.RequestException as e:
+        print(f"FALLO CRÍTICO DE API WATI: No se pudo enviar la respuesta: {e}")
+
+
+# --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (Adaptada para WATI/Meta) ---
+def extract_message_info(data):
+    """Intenta extraer el número del remitente y el texto del mensaje entrante."""
+    try:
         if 'entry' in data and data['entry'][0].get('changes'):
             value = data['entry'][0]['changes'][0]['value']
             
-            # Verifica si hay mensajes entrantes
             if 'messages' in value and value['messages']:
                 message = value['messages'][0]
                 
-                # Procesa solo mensajes de texto
                 if message.get('type') == 'text' and 'text' in message:
                     return {
-                        # El remitente del mensaje
                         'sender': message.get('from'),
-                        # El contenido del mensaje
                         'text': message['text'].get('body', '').strip() 
                     }
     except Exception as e:
@@ -79,33 +110,26 @@ async def handle_whatsapp_messages(request: Request):
         text = message_info['text'].strip().lower()
         
         # --- Obtener y Estandarizar el Estado ---
-        # INICIO siempre es un diccionario: {"state": "INICIO"}
         current_state = user_sessions.get(sender_number, {"state": "INICIO"}) 
         state_name = current_state.get("state")
         
-        print(f"Mensaje de {sender_number} en estado {state_name}: {text}")
-        
         response_text = ""
-        
-        # --- Lógica de la Máquina de Estados ---
         
         # ESTADO INICIO
         if state_name == "INICIO":
             if "agendar" in text or "hora" in text:
                 response_text = "¡Hola! Por favor, indica la fecha (ej. 2025-11-06) para buscar disponibilidad:"
-                user_sessions[sender_number] = {"state": "PREGUNTANDO_FECHA"} # Estado como diccionario
+                user_sessions[sender_number] = {"state": "PREGUNTANDO_FECHA"}
             elif "cancelar" in text or "anular" in text:
                 response_text = "Para cancelar tu cita, por favor ingresa tu **RUT/RUN/DNI**."
-                user_sessions[sender_number] = {"state": "PREGUNTANDO_CANCELAR_RUT"} # Estado como diccionario
+                user_sessions[sender_number] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
             else:
                 response_text = "Bienvenido a Agenza. Escribe 'agendar' o 'cancelar' para comenzar."
-                # El estado se mantiene como {"state": "INICIO"}
 
         # --- ESTADOS DE AGENDAMIENTO ---
         elif state_name == "PREGUNTANDO_FECHA":
             try:
                 fecha_busqueda = datetime.strptime(text, '%Y-%m-%d').date()
-                
                 horas = consultar_disponibilidad(MEDICO_PILOTO_ID, fecha_busqueda)
                 
                 if horas:
@@ -154,7 +178,7 @@ async def handle_whatsapp_messages(request: Request):
                 else:
                     response_text = "❌ ¡Oh no! Alguien reservó ese horario justo ahora. Por favor, escribe 'agendar' para buscar otra hora."
                     
-                user_sessions[sender_number] = {"state": "INICIO"} # Reiniciar con diccionario
+                user_sessions[sender_number] = {"state": "INICIO"}
 
             else:
                 response_text = "Por favor, escribe tu nombre y apellido completo."
