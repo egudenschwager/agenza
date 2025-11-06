@@ -1,10 +1,12 @@
-import requests # <-- Librería para hacer peticiones HTTP a la API de WATI
+# main.py
+import requests # <--- NECESARIO para hacer la llamada POST a WATI
 from fastapi import FastAPI, Request, HTTPException
 import json
 import os
 from datetime import datetime, date 
+from typing import Dict, Any
 
-# Importaciones de las funciones de la BD (de db_service.py)
+# Importaciones de las funciones de la BD (asume que db_service está actualizado)
 from db_service import consultar_disponibilidad, reservar_cita, buscar_citas_pendientes, cancelar_cita 
 
 app = FastAPI()
@@ -12,25 +14,22 @@ app = FastAPI()
 # --- CONFIGURACIÓN PARA EL PILOTO ---
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "AGZ_TOKEN_DE_PRUEBA_123") 
 MEDICO_PILOTO_ID = 1 
-user_sessions = {} # Almacenamiento de estado de sesión (para el diálogo)
+user_sessions: Dict[str, Any] = {} 
 
 
-# --- FUNCIÓN DE ENVÍO REAL A WATI ---
+# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (CON DEBUGGING) ---
 def send_whatsapp_message(recipient_number, message_text):
     """
-    Función REAL: Envía el mensaje al usuario a través de la API de WATI.
-    Utiliza las credenciales configuradas en Railway.
+    Intenta enviar el mensaje al usuario a través de la API de WATI.
+    Incluye logging detallado para diagnosticar fallos de Token/Endpoint.
     """
-    # Credenciales leídas desde las variables de entorno de Railway
-    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT")
-    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
+    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT") 
+    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN") 
     
     if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN:
-        # Esto debería haber sido configurado en Railway
-        print("ERROR: Credenciales de WATI no configuradas. No se pudo enviar el mensaje.")
+        print("ERROR: Credenciales WATI no configuradas.")
         return
 
-    # WATI usa el endpoint /api/v1/sendSessionMessage
     send_message_url = f"{WATI_BASE_ENDPOINT}/api/v1/sendSessionMessage"
     
     headers = {
@@ -38,35 +37,39 @@ def send_whatsapp_message(recipient_number, message_text):
         "Content-Type": "application/json"
     }
     
-    # WATI a menudo requiere el número sin el '+'
-    # El recipient_number de WATI viene sin el '+', pero si viniera con, lo limpiamos
-    number_to_send = recipient_number.replace('+', '')
-    
     payload = {
-        "whatsappNumber": number_to_send,
+        # WATI prefiere el número sin el '+'
+        "whatsappNumber": recipient_number.replace('+', ''), 
         "messageText": message_text
     }
     
     try:
         # Envío POST a la API de WATI
-        response = requests.post(send_message_url, headers=headers, json=payload)
-        response.raise_for_status() # Lanza una excepción para errores 4xx/5xx
-        print(f"ÉXITO API WATI: Mensaje enviado a {recipient_number}. Código: {response.status_code}")
+        response = requests.post(send_message_url, headers=headers, json=payload, timeout=10)
+        
+        # --- LÍNEAS DE DEBUGGING CRÍTICAS ---
+        print("--- DEBUG WATI START ---")
+        print(f"URL Enviada: {send_message_url}")
+        print(f"Status WATI: {response.status_code}") # Código de respuesta de la API de WATI
+        print(f"Respuesta WATI: {response.text}") # JSON de error de WATI (ej. 'Token inválido')
+        print("--- DEBUG WATI END ---")
+        
+        response.raise_for_status() # Lanza error si status >= 400
+        print(f"ÉXITO API WATI: Mensaje enviado.")
         
     except requests.exceptions.RequestException as e:
-        print(f"FALLO CRÍTICO DE API WATI: No se pudo enviar la respuesta: {e}")
+        print(f"FALLO CRÍTICO DE API WATI: Error de conexión o autenticación: {e}")
+        # La aplicación devuelve 200 OK al webhook, pero el mensaje no se envía.
 
 
-# --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (Adaptada para WATI/Meta) ---
+# --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (Sin cambios) ---
 def extract_message_info(data):
-    """Intenta extraer el número del remitente y el texto del mensaje entrante."""
+    """Intenta extraer el número del remitente y el texto del mensaje entrante de la data de WATI/Meta."""
     try:
         if 'entry' in data and data['entry'][0].get('changes'):
             value = data['entry'][0]['changes'][0]['value']
-            
             if 'messages' in value and value['messages']:
                 message = value['messages'][0]
-                
                 if message.get('type') == 'text' and 'text' in message:
                     return {
                         'sender': message.get('from'),
@@ -110,19 +113,24 @@ async def handle_whatsapp_messages(request: Request):
         text = message_info['text'].strip().lower()
         
         # --- Obtener y Estandarizar el Estado ---
+        # Si la sesión no existe, la crea con {"state": "INICIO"}
         current_state = user_sessions.get(sender_number, {"state": "INICIO"}) 
         state_name = current_state.get("state")
         
+        print(f"Mensaje de {sender_number} en estado {state_name}: {text}")
+        
         response_text = ""
+        
+        # --- Lógica de la Máquina de Estados ---
         
         # ESTADO INICIO
         if state_name == "INICIO":
             if "agendar" in text or "hora" in text:
                 response_text = "¡Hola! Por favor, indica la fecha (ej. 2025-11-06) para buscar disponibilidad:"
-                user_sessions[sender_number] = {"state": "PREGUNTANDO_FECHA"}
+                user_sessions[sender_number] = {"state": "PREGUNTANDO_FECHA"} 
             elif "cancelar" in text or "anular" in text:
                 response_text = "Para cancelar tu cita, por favor ingresa tu **RUT/RUN/DNI**."
-                user_sessions[sender_number] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
+                user_sessions[sender_number] = {"state": "PREGUNTANDO_CANCELAR_RUT"} 
             else:
                 response_text = "Bienvenido a Agenza. Escribe 'agendar' o 'cancelar' para comenzar."
 
@@ -131,25 +139,21 @@ async def handle_whatsapp_messages(request: Request):
             try:
                 fecha_busqueda = datetime.strptime(text, '%Y-%m-%d').date()
                 horas = consultar_disponibilidad(MEDICO_PILOTO_ID, fecha_busqueda)
-                
                 if horas:
                     opciones = {}
                     display_list = []
-                    for i, h in enumerate(horas):
+                    for h in horas:
                         opciones[str(h['id_bloque'])] = h 
                         display_list.append(f"*{h['id_bloque']}*: {h['hora_inicio_str']}")
-                        
                     response_text = f"Horas disponibles el {text}:\n\n" + "\n".join(display_list) + "\n\nResponde con el *ID de bloque* que deseas reservar."
                     user_sessions[sender_number] = {"state": "PREGUNTANDO_BLOQUE", "opciones": opciones}
                 else:
                     response_text = "No hay horas disponibles para esa fecha. ¿Puedes intentar con otra?"
-                    
             except ValueError:
                 response_text = "El formato de la fecha es incorrecto. Usa AAAA-MM-DD (ej. 2025-11-06)."
 
         elif state_name == "PREGUNTANDO_BLOQUE":
             opciones_validas = current_state.get('opciones', {})
-            
             if text in opciones_validas:
                 bloque_seleccionado = opciones_validas[text]
                 user_sessions[sender_number] = {"state": "PREGUNTANDO_RUT", "bloque_id": bloque_seleccionado['id_bloque']}
@@ -178,7 +182,7 @@ async def handle_whatsapp_messages(request: Request):
                 else:
                     response_text = "❌ ¡Oh no! Alguien reservó ese horario justo ahora. Por favor, escribe 'agendar' para buscar otra hora."
                     
-                user_sessions[sender_number] = {"state": "INICIO"}
+                user_sessions[sender_number] = {"state": "INICIO"} 
 
             else:
                 response_text = "Por favor, escribe tu nombre y apellido completo."
@@ -234,7 +238,6 @@ async def handle_whatsapp_messages(request: Request):
     
     except Exception as e:
         print(f"Error procesando el mensaje: {e}")
-        # Reiniciar la sesión a un estado seguro en caso de fallo
         user_sessions[sender_number] = {"state": "INICIO"}
         send_whatsapp_message(sender_number, "Lo siento, hubo un fallo. Escribe 'agendar' o 'cancelar' para empezar de nuevo.")
         return {"status": "error"}, 200
