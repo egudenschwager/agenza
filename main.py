@@ -23,18 +23,26 @@ def send_whatsapp_message(recipient_number, message_text):
 
 # --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (Adaptada para Simulación) ---
 def extract_message_info(data):
-    """Extrae el número del remitente y el texto del mensaje entrante (Simplificado)."""
+    """Intenta extraer el número del remitente y el texto del mensaje entrante de la data de WATI/Meta."""
     try:
+        # Busca el evento de mensaje en la estructura de Meta/WATI
         if 'entry' in data and data['entry'][0].get('changes'):
             value = data['entry'][0]['changes'][0]['value']
+            
+            # Verifica si hay mensajes entrantes
             if 'messages' in value and value['messages']:
                 message = value['messages'][0]
-                if message['type'] == 'text':
+                
+                # Procesa solo mensajes de texto
+                if message.get('type') == 'text' and 'text' in message:
                     return {
-                        'sender': message['from'],
-                        'text': message['text']['body']
+                        # El remitente del mensaje
+                        'sender': message.get('from'),
+                        # El contenido del mensaje
+                        'text': message['text'].get('body', '').strip() 
                     }
-    except:
+    except Exception as e:
+        print(f"ERROR EN EXTRACCIÓN DE MENSAJE: {e}")
         return None
     return None
 
