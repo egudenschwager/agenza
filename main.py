@@ -17,13 +17,13 @@ MEDICO_PILOTO_ID = 1
 user_sessions: Dict[str, Any] = {} 
 
 
-# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (SOLUCIÓN FINAL API V2) ---
+# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (SOLUCIÓN FINAL DE HOST) ---
 def send_whatsapp_message(recipient_number, message_text):
     """
     FUNCIÓN FINAL: Envía el mensaje al usuario usando la API v2 de WATI.
-    Utiliza el endpoint simple y el payload (cuerpo) correcto para v2.
+    La URL base debe ser 'https://live-server.wati.io'.
     """
-    # 🚨 NOTA: WATI_ENDPOINT_BASE debe ser la URL sin el ID de cuenta (ej. https://live-mt-server.wati.io)
+    # 🚨 WATI_ENDPOINT_BASE DEBE CONTENER: https://live-server.wati.io
     WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")
     WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
     
@@ -31,7 +31,7 @@ def send_whatsapp_message(recipient_number, message_text):
         print("ERROR: Credenciales WATI no configuradas. Abortando envío.")
         return
 
-    # La URL de envío para API v2 es simple y NO lleva el tenantId en la ruta.
+    # Construcción Final de URL v2, asumiendo el HOST correcto en la variable de entorno.
     send_message_url = f"{WATI_BASE_ENDPOINT}/api/v2/messages"
     
     headers = {
@@ -40,7 +40,7 @@ def send_whatsapp_message(recipient_number, message_text):
     }
     
     payload = {
-        # El endpoint v2 usa 'messageText' y 'wabaPhoneNumber' (sin el '+')
+        # Payload correcto para API v2
         "messageText": message_text,
         "wabaPhoneNumber": recipient_number.replace('+', '')
     }
@@ -49,7 +49,7 @@ def send_whatsapp_message(recipient_number, message_text):
         response = requests.post(send_message_url, headers=headers, json=payload, timeout=10)
         
         # --- DEBUGGING CRÍTICO ---
-        print("--- DEBUG WATI START (SOLUCIÓN V2) ---")
+        print("--- DEBUG WATI START (SOLUCIÓN HOST FINAL) ---")
         print(f"URL FINAL V2 ENVIADA: {send_message_url}")
         print(f"Status WATI: {response.status_code}") 
         print(f"Respuesta WATI (CUERPO): {response.text}") 
