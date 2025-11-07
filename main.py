@@ -1,96 +1,86 @@
 # main.py
 import requests
 from fastapi import FastAPI, Request, HTTPException
+import json
 import os
+from datetime import datetime, date
 from typing import Dict, Any
-from datetime import datetime
 
-# Importaciones de tu servicio de BD
+# Funciones de la BD
 from db_service import consultar_disponibilidad, reservar_cita, buscar_citas_pendientes, cancelar_cita
 
 app = FastAPI()
 
-# Config global
+# --- CONFIGURACIÓN ---
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "AGZ_TOKEN_DE_PRUEBA_123")
 MEDICO_PILOTO_ID = 1
 user_sessions: Dict[str, Any] = {}
 
 
-# ---------------------------------------------------------
-# ✅ FUNCIÓN DE ENVÍO A WATI (BLINDADA Y FINAL)
-# ---------------------------------------------------------
-def send_whatsapp_message(recipient_number: str, message_text: str):
+# ============================================================
+# ✅ FUNCIÓN FINAL DE ENVÍO A WATI (TU TENANT → usa "message")
+# ============================================================
+def send_whatsapp_message(recipient_number, message_text):
 
-    # ▶ Variables desde Railway
-    WATI_BASE = os.getenv("WATI_ENDPOINT_BASE")          # https://live-mt-server.wati.io
-    WATI_TOKEN = os.getenv("WATI_ACCESS_TOKEN")          # Bearer eyJ...
-    WATI_TENANT = os.getenv("WATI_ACCOUNT_ID")           # 1043548
+    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")          # https://live-mt-server.wati.io
+    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")            # Bearer xxx
+    WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID")                # 1043548
 
-    if not WATI_BASE or not WATI_TOKEN or not WATI_TENANT:
-        print("❌ ERROR: Variables de entorno WATI incompletas.")
+    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN or not WATI_ACCOUNT_ID:
+        print("ERROR: Credenciales WATI no configuradas.")
         return
 
-    # ▶ Normalizar número
-    wa_number = recipient_number.replace("+", "").strip()
-
-    # ▶ URL oficial final ✅
-    url = f"{WATI_BASE}/{WATI_TENANT}/api/v1/sendSessionMessage/{wa_number}"
-
-    # ▶ Evitar errores por cadena vacía
-    if not message_text or not message_text.strip():
-        print(f"⚠ No se envió mensaje: message_text vacío para {recipient_number}")
-        return
+    wa_id = recipient_number.replace("+", "")
+    url = f"{WATI_BASE_ENDPOINT}/{WATI_ACCOUNT_ID}/api/v1/sendSessionMessage/{wa_id}"
 
     headers = {
-        "Authorization": WATI_TOKEN,  # El valor en Railway DEBE incluir "Bearer "
+        "Authorization": WATI_ACCESS_TOKEN,
         "Content-Type": "application/json"
     }
 
-    payload = {"messageText": message_text}
-
-    # ▶ DEBUG limpio
-    print("\n--- DEBUG ENVÍO WATI (v1) ---")
-    print("URL:", url)
-    print("TO:", wa_number)
-    print("TEXT:", message_text)
-    print("------------------------------")
+    # ✅ FIX: Tu tenant NO usa messageText → usa message
+    payload = {
+        "message": message_text
+    }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+
+        print("\n--- DEBUG ENVÍO WATI (v1) ---")
+        print("URL:", url)
+        print("TO:", wa_id)
+        print("TEXT:", message_text)
+        print("------------------------------")
         print("STATUS:", response.status_code)
         print("BODY:", response.text)
-        response.raise_for_status()
         print("✅ MENSAJE ENVIADO A WATI\n")
 
-    except Exception as e:
-        print("❌ ERROR AL ENVIAR A WATI:", e)
+        response.raise_for_status()
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ ERROR enviando mensaje a WATI: {e}")
 
 
-# ---------------------------------------------------------
-# ✅ EXTRAER DATOS DEL MENSAJE ENTRANTE
-# ---------------------------------------------------------
+# ============================================================
+# ✅ EXTRACCIÓN DEL MENSAJE DESDE EL JSON RAW DE WATI
+# ============================================================
 def extract_message_info(data):
-    """
-    WATI v1 entrega un JSON plano con:
-    type = 'text'
-    waId = '569xxxxxxx'
-    text = 'mensaje'
-    """
-    try:
-        if data.get("type") == "text":
-            return {
-                "sender": "+" + data.get("waId", ""),
-                "text": data.get("text", "").strip()
-            }
-    except:
-        pass
+
+    # ✅ Tu tenant envía siempre este formato:
+    #    {"text": "...", "type": "text", "waId": "569..."}
+
+    if data.get("type") == "text" and "text" in data:
+        return {
+            "sender": "+" + data.get("waId", ""),
+            "text": data.get("text", "").strip()
+        }
 
     return None
 
 
-# ---------------------------------------------------------
-# ✅ WEBHOOK GET (verificación)
-# ---------------------------------------------------------
+# ============================================================
+# ✅ VERIFICACIÓN DEL WEBHOOK
+# ============================================================
 @app.get("/webhook")
 def verify_webhook(request: Request):
     try:
@@ -99,82 +89,68 @@ def verify_webhook(request: Request):
         challenge = request.query_params.get("hub.challenge")
 
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("✅ WEBHOOK VERIFICADO POR WATI")
+            print("✅ WEBHOOK VERIFICADO")
             return int(challenge)
-        else:
-            raise HTTPException(status_code=403, detail="Token inválido")
 
-    except:
-        raise HTTPException(status_code=500, detail="Error interno")
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# ---------------------------------------------------------
-# ✅ WEBHOOK POST (LÓGICA DE AGENZA)
-# ---------------------------------------------------------
+# ============================================================
+# ✅ LÓGICA DEL CHATBOT
+# ============================================================
 @app.post("/webhook")
 async def handle_whatsapp_messages(request: Request):
     try:
         data = await request.json()
 
-        # ▶ Debug entrada
         print("\n==== RAW WEBHOOK ====")
         print(data)
-        print("=====================")
+        print("=====================\n")
 
         message_info = extract_message_info(data)
 
         if not message_info:
-            print("⚠ Webhook ignorado (no es texto)")
             return {"status": "ignored"}
 
         sender_number = message_info["sender"]
-        text = message_info["text"].lower().strip()
+        text = message_info["text"].lower()
 
         current_state = user_sessions.get(sender_number, {"state": "INICIO"})
         state = current_state["state"]
 
         response_text = ""
 
-        # -----------------------------------------------------
-        # ✅ ESTADO INICIO
-        # -----------------------------------------------------
+        # -----------------------
+        # ✅ Estado inicial
+        # -----------------------
         if state == "INICIO":
-            if "agendar" in text or "hora" in text:
-                response_text = "¡Hola! Indica la fecha (ej. 2025-11-06) para buscar disponibilidad."
+            if "agendar" in text:
+                response_text = "Perfecto 👍 ¿Qué fecha deseas? (Ej: 2025-11-06)"
                 user_sessions[sender_number] = {"state": "PREGUNTANDO_FECHA"}
 
-            elif "cancelar" in text or "anular" in text:
-                response_text = "Para cancelar tu cita, por favor ingresa tu RUT/RUN/DNI."
+            elif "cancelar" in text:
+                response_text = "Para cancelar tu cita, indícame tu RUT/RUN/DNI."
                 user_sessions[sender_number] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
 
             else:
                 response_text = "Bienvenido a Agenza. Escribe 'agendar' o 'cancelar' para comenzar."
 
-        # -----------------------------------------------------
-        # ✅ (INCOMPLETO) — Agregar aquí tu lógica completa
-        # -----------------------------------------------------
-        # Ejemplo:
-        # if state == "PREGUNTANDO_FECHA":
-        #    ...
+        # ✅ Más estados se agregan aquí…
 
-        # -----------------------------------------------------
-        # ✅ Enviar respuesta final
-        # -----------------------------------------------------
-        if response_text.strip():
-            print(">>> RESPUESTA:", response_text)
+        # -----------------------
+        # ✅ Enviar mensaje
+        # -----------------------
+        if response_text:
+            print(f">>> RESPUESTA: {response_text}")
             send_whatsapp_message(sender_number, response_text)
-        else:
-            print("⚠ No se envió mensaje porque response_text era vacío.")
 
         return {"status": "ok"}
 
     except Exception as e:
-        print("❌ ERROR en webhook:", e)
-        user_sessions[sender_number] = {"state": "INICIO"}
+        print("❌ ERROR WEBHOOK:", e)
+        send_whatsapp_message(sender_number, "Lo siento, ocurrió un error. Escribe 'agendar' para comenzar.")
+        return {"status": "error"}
 
-        send_whatsapp_message(
-            sender_number,
-            "Lo siento, ocurrió un error. Escribe 'agendar' o 'cancelar' para volver a empezar."
-        )
-
-        return {"status": "error"}, 200
