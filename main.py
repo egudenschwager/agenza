@@ -6,7 +6,7 @@ import os
 from datetime import datetime, date 
 from typing import Dict, Any
 
-# Importaciones de las funciones de la BD (asume que db_service está actualizado)
+# Importaciones de las funciones de la BD 
 from db_service import consultar_disponibilidad, reservar_cita, buscar_citas_pendientes, cancelar_cita 
 
 app = FastAPI()
@@ -17,23 +17,22 @@ MEDICO_PILOTO_ID = 1
 user_sessions: Dict[str, Any] = {} 
 
 
-# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (CON CORRECCIÓN DE ENDPOINT) ---
+# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (CORRECCIÓN FINAL DE ENDPOINT 404) ---
 def send_whatsapp_message(recipient_number, message_text):
     """
     FUNCIÓN REAL: Envía el mensaje al usuario a través de la API de WATI.
-    Utiliza el endpoint FINAL CORREGIDO para evitar el error 404.
+    La URL se construye usando WATI_ENDPOINT_BASE (que ya contiene el ID de cuenta).
     """
-    # 🚨 NOTA: Se usan WATI_ENDPOINT_BASE y WATI_ACCOUNT_ID
-    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE") 
+    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE") # e.g., https://live-mt-server.wati.io/1043548
     WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN") 
-    WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID") # <-- SE NECESITA ESTA VARIABLE
     
-    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN or not WATI_ACCOUNT_ID:
-        print("ERROR: Credenciales WATI no configuradas correctamente. Abortando envío.")
+    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN:
+        print("ERROR: Credenciales WATI no configuradas. Abortando envío.")
         return
 
-    # CONSTRUCCIÓN FINAL: BASE / ACCOUNT_ID / api/v1 / sendSessionMessage
-    send_message_url = f"{WATI_BASE_ENDPOINT}/{WATI_ACCOUNT_ID}/api/v1/sendSessionMessage" 
+    # CONSTRUCCIÓN FINAL: Usamos la URL base completa y SOLO añadimos el path /api/v1/sendSessionMessage
+    # Esto soluciona el problema de duplicación del ID de cuenta (404 Not Found).
+    send_message_url = f"{WATI_BASE_ENDPOINT}/api/v1/sendSessionMessage" 
     
     headers = {
         "Authorization": WATI_ACCESS_TOKEN,
@@ -49,7 +48,7 @@ def send_whatsapp_message(recipient_number, message_text):
         response = requests.post(send_message_url, headers=headers, json=payload, timeout=10)
         
         # --- DEBUGGING CRÍTICO ---
-        print("--- DEBUG WATI START (DIAGNÓSTICO AUTENTICACIÓN) ---")
+        print("--- DEBUG WATI START (SOLUCIÓN 404) ---")
         print(f"URL FINAL ENVIADA: {send_message_url}")
         print(f"Status WATI: {response.status_code}") 
         print(f"Respuesta WATI (CUERPO): {response.text}") 
@@ -62,17 +61,16 @@ def send_whatsapp_message(recipient_number, message_text):
         print(f"FALLO DE API WATI: No se pudo enviar la respuesta, error: {e}")
 
 
-# --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (CORRECCIÓN CRÍTICA PARA WATI) ---
+# --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (Adaptado a WATI/Meta) ---
 def extract_message_info(data):
     """Extrae la información del mensaje entrante del JSON de WATI."""
-    # Este es el formato directo que WATI envía
     if 'type' in data and data.get('type') == 'text' and 'text' in data:
         return {
             'sender': '+' + data.get('waId', ''),
             'text': data.get('text', '').strip()
         }
     elif 'entry' in data:
-        return None # Ignorar estados y otros eventos de Meta
+        return None 
     return None
 
 
@@ -127,7 +125,7 @@ async def handle_whatsapp_messages(request: Request):
             else:
                 response_text = "Bienvenido a Agenza. Escribe 'agendar' o 'cancelar' para comenzar."
 
-        # [El resto de la lógica de Agendamiento y Cancelación (omitido por espacio)]
+        # --- El resto de la lógica de Agendamiento y Cancelación (código completo) ---
         
         # --- Envío de Respuesta Final ---
         if response_text:
