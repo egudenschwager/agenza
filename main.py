@@ -17,22 +17,23 @@ MEDICO_PILOTO_ID = 1
 user_sessions: Dict[str, Any] = {} 
 
 
-# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (CON DEBUGGING DE AUTENTICACIÓN) ---
+# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (CON CORRECCIÓN DE ENDPOINT) ---
 def send_whatsapp_message(recipient_number, message_text):
     """
     FUNCIÓN REAL: Envía el mensaje al usuario a través de la API de WATI.
-    Utiliza el endpoint exacto y las credenciales de Railway.
+    Utiliza el endpoint FINAL CORREGIDO para evitar el error 404.
     """
-    # 🚨 NOTA: Se debe usar WATI_ENDPOINT_BASE para la URL sin la ruta /api/v1/
-    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")
-    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
+    # 🚨 NOTA: Se usan WATI_ENDPOINT_BASE y WATI_ACCOUNT_ID
+    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE") 
+    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN") 
+    WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID") # <-- SE NECESITA ESTA VARIABLE
     
-    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN:
-        print("ERROR: Credenciales WATI no configuradas. Abortando envío.")
+    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN or not WATI_ACCOUNT_ID:
+        print("ERROR: Credenciales WATI no configuradas correctamente. Abortando envío.")
         return
 
-    # Endpoint para mensajes de sesión
-    send_message_url = f"{WATI_BASE_ENDPOINT}/api/v1/sendSessionMessage"
+    # CONSTRUCCIÓN FINAL: BASE / ACCOUNT_ID / api/v1 / sendSessionMessage
+    send_message_url = f"{WATI_BASE_ENDPOINT}/{WATI_ACCOUNT_ID}/api/v1/sendSessionMessage" 
     
     headers = {
         "Authorization": WATI_ACCESS_TOKEN,
@@ -49,6 +50,7 @@ def send_whatsapp_message(recipient_number, message_text):
         
         # --- DEBUGGING CRÍTICO ---
         print("--- DEBUG WATI START (DIAGNÓSTICO AUTENTICACIÓN) ---")
+        print(f"URL FINAL ENVIADA: {send_message_url}")
         print(f"Status WATI: {response.status_code}") 
         print(f"Respuesta WATI (CUERPO): {response.text}") 
         print("--- DEBUG WATI END ---")
@@ -62,25 +64,16 @@ def send_whatsapp_message(recipient_number, message_text):
 
 # --- FUNCIÓN AUXILIAR DE EXTRACCIÓN DEL MENSAJE (CORRECCIÓN CRÍTICA PARA WATI) ---
 def extract_message_info(data):
-    """
-    Extrae la información del mensaje entrante del JSON de WATI, 
-    que envía el objeto de mensaje directamente (no dentro de 'entry'/'messages').
-    """
-    # Verifica si el objeto data contiene las claves del mensaje de WATI
-    # Este es el formato directo que envían
+    """Extrae la información del mensaje entrante del JSON de WATI."""
+    # Este es el formato directo que WATI envía
     if 'type' in data and data.get('type') == 'text' and 'text' in data:
         return {
-            # El número del remitente se encuentra en la clave 'waId'
             'sender': '+' + data.get('waId', ''),
-            # El contenido del mensaje se encuentra en la clave 'text'
             'text': data.get('text', '').strip()
         }
-    
-    # Manejar el caso de que sea un JSON de Meta (ej. verificación o estado)
     elif 'entry' in data:
         return None # Ignorar estados y otros eventos de Meta
-
-    return None # Ignorar otros tipos de eventos de WATI
+    return None
 
 
 # --- ENDPOINT GET: Verificación del Webhook ---
@@ -106,7 +99,6 @@ def verify_webhook(request: Request):
 @app.post("/webhook")
 async def handle_whatsapp_messages(request: Request):
     try:
-        # Aquí la extracción de RAW BODY nos confirmó que WATI envía el objeto directamente
         data = await request.json()
         message_info = extract_message_info(data)
         
@@ -135,27 +127,7 @@ async def handle_whatsapp_messages(request: Request):
             else:
                 response_text = "Bienvenido a Agenza. Escribe 'agendar' o 'cancelar' para comenzar."
 
-        # --- ESTADOS DE AGENDAMIENTO (omitidos por espacio, pero presentes en tu código) ---
-        elif state_name == "PREGUNTANDO_FECHA":
-            # ... (código de consulta BD y transición)
-            pass
-        elif state_name == "PREGUNTANDO_BLOQUE":
-            # ... (código de selección de bloque)
-            pass
-        elif state_name == "PREGUNTANDO_RUT":
-            # ... (código de validación de RUT)
-            pass
-        elif state_name == "PREGUNTANDO_NOMBRE":
-            # ... (código de transacción ATÓMICA y envío de confirmación)
-            pass
-
-        # --- ESTADOS DE CANCELACIÓN (omitidos por espacio) ---
-        elif state_name == "PREGUNTANDO_CANCELAR_RUT":
-            # ... (código de búsqueda de citas)
-            pass
-        elif state_name == "PREGUNTANDO_CANCELAR_CITA":
-            # ... (código de reversión ATÓMICA)
-            pass
+        # [El resto de la lógica de Agendamiento y Cancelación (omitido por espacio)]
         
         # --- Envío de Respuesta Final ---
         if response_text:
