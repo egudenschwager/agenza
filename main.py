@@ -1,66 +1,94 @@
 # main.py
 import requests
 from fastapi import FastAPI, Request, HTTPException
-import json
 import os
 from typing import Dict, Any
+from datetime import datetime
 
-from db_service import consultar_disponibilidad, reservar_cita, buscar_citas_pendientes, cancelar_cita
+# --- Importar servicios de base de datos ---
+from db_service import (
+    consultar_disponibilidad,
+    reservar_cita,
+    buscar_citas_pendientes,
+    cancelar_cita
+)
 
+# ================================
+# CONFIG GLOBAL
+# ================================
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "AGZ_TOKEN_DE_PRUEBA_123")
 MEDICO_PILOTO_ID = 1
+
+# Sesiones por usuario
 user_sessions: Dict[str, Any] = {}
 
 
-# ✅ Sanitizador para WATI
-def sanitize_text(text: str) -> str:
+# ======================================================
+# ✅ SANITIZADOR DE MENSAJES PARA PLANTILLAS WATI
+# ======================================================
+def sanitize_message(text: str) -> str:
     if not text:
         return ""
-    return text.replace("'", "\\'").replace('"', '\\"')
+    text = text.replace("*", "")
+    text = text.replace("_", "")
+    text = text.replace("~", "")
+    text = text.replace("`", "")
+    return text.strip()
 
 
-# ✅ Envío REAL a WATI con messageText (correcto para tu tenant)
-def send_whatsapp_message(recipient_number, message_text):
+# ======================================================
+# ✅ FUNCIÓN PARA ENVIAR PLANTILLAS DE WATI (V1)
+# ======================================================
+def send_template_message(recipient_number: str, template_name: str, param_value="Hola"):
+    WATI_BASE = os.getenv("WATI_ENDPOINT_BASE")  # https://live-mt-server.wati.io
+    WATI_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
+    WATI_ID = os.getenv("WATI_ACCOUNT_ID")  # 1043548
 
-    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")
-    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
-    WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID")
-
-    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN or not WATI_ACCOUNT_ID:
-        print("ERROR: Credenciales WATI no configuradas.")
+    if not WATI_BASE or not WATI_TOKEN or not WATI_ID:
+        print("❌ ERROR: Variables de entorno WATI no configuradas.")
         return
 
-    wa_id = recipient_number.replace("+", "")
-    url = f"{WATI_BASE_ENDPOINT}/{WATI_ACCOUNT_ID}/api/v1/sendSessionMessage/{wa_id}"
+    # Limpiar número (+569 -> 569)
+    wa = recipient_number.replace("+", "")
+
+    url = f"{WATI_BASE}/{WATI_ID}/api/v1/sendTemplateMessage"
 
     headers = {
-        "Authorization": WATI_ACCESS_TOKEN,
+        "Authorization": WATI_TOKEN,
         "Content-Type": "application/json"
     }
 
     payload = {
-        "messageText": sanitize_text(message_text)
+        "template_name": template_name,
+        "broadcast_name": template_name,
+        "parameters": [
+            {"name": "1", "value": param_value}
+        ],
+        "receivers": [
+            {"whatsappNumber": wa}
+        ]
     }
 
-    response = requests.post(url, headers=headers, json=payload, timeout=10)
-
-    print("\n--- DEBUG WATI (V1) ---")
+    print("=== DEBUG TEMPLATE SEND ===")
     print("URL:", url)
-    print("TO:", wa_id)
-    print("MESSAGE (raw):", message_text)
-    print("MESSAGE (sanitized):", payload["messageText"])
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
-    print("------------------------\n")
+    print("Payload:", payload)
+    print("===========================")
 
-    response.raise_for_status()
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        print("STATUS:", r.status_code)
+        print("BODY:", r.text)
+    except Exception as e:
+        print("❌ ERROR enviando plantilla:", e)
 
 
-# ✅ Extractor WATI
+# ======================================================
+# ✅ EXTRAER MENSAJE DESDE WATI
+# ======================================================
 def extract_message_info(data):
-    if data.get("type") == "text" and "text" in data:
+    if "type" in data and data.get("type") == "text":
         return {
             "sender": "+" + data.get("waId", ""),
             "text": data.get("text", "").strip()
@@ -68,50 +96,125 @@ def extract_message_info(data):
     return None
 
 
-# ✅ Verificación webhook
+# ======================================================
+# ✅ ENDPOINT GET – VERIFICACIÓN DE WEBHOOK
+# ======================================================
 @app.get("/webhook")
 def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
+    try:
+        mode = request.query_params.get("hub.mode")
+        token = request.query_params.get("hub.verify_token")
+        challenge = request.query_params.get("hub.challenge")
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return int(challenge)
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("✅ WEBHOOK VERIFICADO")
+            return int(challenge)
 
-    raise HTTPException(status_code=403, detail="Token inválido")
+        raise HTTPException(status_code=403, detail="Token incorrecto")
+
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# ✅ Endpoint principal
+# ======================================================
+# ✅ ENDPOINT POST – RECEPCIÓN DE MENSAJES
+# ======================================================
 @app.post("/webhook")
 async def handle_whatsapp_messages(request: Request):
     data = await request.json()
 
     print("\n==== RAW WEBHOOK ====")
     print(data)
-    print("=====================\n")
+    print("=====================")
 
-    message_info = extract_message_info(data)
-    if not message_info:
+    info = extract_message_info(data)
+    if not info:
         return {"status": "ignored"}
 
-    sender = message_info["sender"]
-    text = message_info["text"].lower()
+    sender = info["sender"]
+    text = info["text"].lower().strip()
 
+    # Estado actual del usuario
     state = user_sessions.get(sender, {"state": "INICIO"})["state"]
 
-    response_text = ""
-
+    # ===========================================
+    # ✅ LÓGICA DE ESTADOS - INICIO
+    # ===========================================
     if state == "INICIO":
-        if "agendar" in text:
-            response_text = "Perfecto 👍 ¿Qué fecha deseas? (Ej: 2025-11-06)"
-            user_sessions[sender] = {"state": "PREGUNTANDO_FECHA"}
-        elif "cancelar" in text:
-            response_text = "Para cancelar tu cita, indícame tu RUT/RUN/DNI."
-            user_sessions[sender] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
-        else:
-            response_text = "Bienvenido a Agenza. Escribe agendar o cancelar para comenzar."
 
-    if response_text:
-        send_whatsapp_message(sender, response_text)
+        # Usuario quiere agendar
+        if "agendar" in text or "hora" in text:
+            user_sessions[sender] = {"state": "PREGUNTANDO_FECHA"}
+            send_template_message(sender, "agenza_bienvenida")  
+            return {"status": "ok"}
+
+        # Usuario quiere cancelar
+        if "cancelar" in text or "anular" in text:
+            user_sessions[sender] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
+            send_template_message(sender, "agenza_bienvenida")
+            return {"status": "ok"}
+
+        # ✅ Si el usuario dice "hola", mandar PLANTILLA
+        send_template_message(sender, "agenza_bienvenida")
+        return {"status": "template_sent"}
+
+    # ===========================================
+    # ✅ ESTADO: PREGUNTANDO_FECHA
+    # ===========================================
+    if state == "PREGUNTANDO_FECHA":
+        try:
+            fecha = datetime.strptime(text, "%Y-%m-%d").date()
+            disponibilidad = consultar_disponibilidad(MEDICO_PILOTO_ID, fecha)
+
+            if not disponibilidad:
+                send_template_message(sender, "agenza_bienvenida")  
+                return {"status": "ok"}
+
+            horas = ", ".join([d["hora"] for d in disponibilidad])
+            message = f"✅ Disponibilidad para {fecha}:\n{horas}\n\nElige una hora."
+
+            send_template_message(sender, "agenza_bienvenida")
+            user_sessions[sender] = {"state": "PREGUNTANDO_HORA", "fecha": str(fecha)}
+            return {"status": "ok"}
+        except:
+            send_template_message(sender, "agenza_bienvenida")
+            return {"status": "ok"}
+
+    # ===========================================
+    # ✅ ESTADO: PREGUNTANDO_HORA
+    # ===========================================
+    if state == "PREGUNTANDO_HORA":
+        hora = text
+        fecha = user_sessions[sender].get("fecha")
+
+        if not fecha:
+            send_template_message(sender, "agenza_bienvenida")
+            return {"status": "ok"}
+
+        ok = reservar_cita(MEDICO_PILOTO_ID, fecha, hora, sender)
+
+        if ok:
+            send_template_message(sender, "agenza_bienvenida")
+        else:
+            send_template_message(sender, "agenza_bienvenida")
+
+        user_sessions[sender] = {"state": "INICIO"}
+        return {"status": "ok"}
+
+    # ===========================================
+    # ✅ ESTADO: PREGUNTANDO_CANCELAR_RUT
+    # ===========================================
+    if state == "PREGUNTANDO_CANCELAR_RUT":
+        rut = text
+        citas = buscar_citas_pendientes(rut)
+
+        if not citas:
+            send_template_message(sender, "agenza_bienvenida")
+            return {"status": "ok"}
+
+        cancelar_cita(rut)
+        send_template_message(sender, "agenza_bienvenida")
+        user_sessions[sender] = {"state": "INICIO"}
+        return {"status": "ok"}
 
     return {"status": "ok"}
