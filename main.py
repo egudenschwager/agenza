@@ -17,22 +17,26 @@ MEDICO_PILOTO_ID = 1
 user_sessions: Dict[str, Any] = {} 
 
 
-# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (SOLUCIÓN FINAL DE HOST) ---
+# --- FUNCIÓN DE ENVÍO REAL A LA API DE WATI (SOLUCIÓN FINAL API V1) ---
 def send_whatsapp_message(recipient_number, message_text):
     """
-    FUNCIÓN FINAL: Envía el mensaje al usuario usando la API v2 de WATI.
-    La URL base debe ser 'https://live-server.wati.io'.
+    FUNCIÓN FINAL: Envía el mensaje al usuario usando el ENDPOINT V1 (clásico), 
+    que es el único que funciona para el tenant 1043548.
     """
-    # 🚨 WATI_ENDPOINT_BASE DEBE CONTENER: https://live-server.wati.io
+    # 🚨 NOTA: Las variables de entorno son cruciales aquí.
+    # WATI_ENDPOINT_BASE debe ser: https://live-mt-server.wati.io
     WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")
     WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
+    WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID") # 1043548
     
-    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN:
+    if not WATI_BASE_ENDPOINT or not WATI_ACCESS_TOKEN or not WATI_ACCOUNT_ID:
         print("ERROR: Credenciales WATI no configuradas. Abortando envío.")
         return
-
-    # Construcción Final de URL v2, asumiendo el HOST correcto en la variable de entorno.
-    send_message_url = f"{WATI_BASE_ENDPOINT}/api/v2/messages"
+    
+    # URL FINAL CORRECTA: BASE / ACCOUNT_ID / api/v1 / sendSessionMessage / {waId}
+    # NOTA: Debemos eliminar el '+' del número para el endpoint.
+    wa_id_for_url = recipient_number.replace('+', '')
+    send_message_url = f"{WATI_BASE_ENDPOINT}/{WATI_ACCOUNT_ID}/api/v1/sendSessionMessage/{wa_id_for_url}"
     
     headers = {
         "Authorization": WATI_ACCESS_TOKEN,
@@ -40,17 +44,16 @@ def send_whatsapp_message(recipient_number, message_text):
     }
     
     payload = {
-        # Payload correcto para API v2
-        "messageText": message_text,
-        "wabaPhoneNumber": recipient_number.replace('+', '')
+        # Payload V1 simple
+        "messageText": message_text
     }
     
     try:
         response = requests.post(send_message_url, headers=headers, json=payload, timeout=10)
         
         # --- DEBUGGING CRÍTICO ---
-        print("--- DEBUG WATI START (SOLUCIÓN HOST FINAL) ---")
-        print(f"URL FINAL V2 ENVIADA: {send_message_url}")
+        print("--- DEBUG WATI START (SOLUCIÓN FINAL V1) ---")
+        print(f"URL FINAL V1 ENVIADA: {send_message_url}")
         print(f"Status WATI: {response.status_code}") 
         print(f"Respuesta WATI (CUERPO): {response.text}") 
         print("--- DEBUG WATI END ---")
