@@ -1,11 +1,12 @@
 # main.py
 import requests
 from fastapi import FastAPI, Request, HTTPException
+import json
 import os
-from datetime import datetime
+from datetime import datetime, date 
 from typing import Dict, Any, List
 
-# Funciones BD
+# --- Importar funciones de base de datos (asume db_service está en la carpeta) ---
 from db_service import (
     consultar_disponibilidad,
     reservar_cita,
@@ -13,75 +14,76 @@ from db_service import (
     cancelar_cita
 )
 
+# ================================
+# CONFIG GLOBAL
+# ================================
 app = FastAPI()
 
-# =======================================
-# CONFIG
-# =======================================
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "AGZ_TOKEN_DE_PRUEBA_123")
 MEDICO_PILOTO_ID = 1
 
-# Sesiones
+# Sesiones por usuario
 user_sessions: Dict[str, Any] = {}
 
-# =======================================
-# ✅ FUNCIÓN PARA ENVIAR PLANTILLA (V1)
-# =======================================
 
-def send_template_message(recipient_number: str, template_name: str, parameters: List[Dict[str, str]]):
+# ======================================================
+# ✅ FUNCIÓN PARA ENVIAR PLANTILLAS DE WATI (V1 LEGACY)
+# ======================================================
+def send_template_message(recipient_number: str, template_name: str, param_value: str = "Estimado/a cliente"):
     """
-    Envía una plantilla aprobada usando API V1 sendTemplateMessage.
-    Funciona perfecto para bots que responden mensajes entrantes.
+    FUNCIÓN FINAL: Envía la Plantilla Aprobada de WATI (requerido para el tenant V1).
     """
+    WATI_BASE = os.getenv("WATI_ENDPOINT_BASE")
+    WATI_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
+    WATI_ID = os.getenv("WATI_ACCOUNT_ID")
 
-    WATI_BASE_URL = os.getenv("WATI_ENDPOINT_BASE")     # https://live-mt-server.wati.io
-    WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID")      # 1043548
-    WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")  # Bearer xxx
-
-    if not WATI_BASE_URL or not WATI_ACCOUNT_ID or not WATI_ACCESS_TOKEN:
-        print("❌ ERROR: Variables WATI no configuradas.")
+    if not WATI_BASE or not WATI_TOKEN or not WATI_ID:
+        print("❌ ERROR: Variables de entorno WATI no configuradas.")
         return
 
-    url = f"{WATI_BASE_URL}/{WATI_ACCOUNT_ID}/api/v1/sendTemplateMessage"
+    # Endpoint V1/Broadcast: BASE / ACCOUNT_ID / api/v1 / broadcast / scheduleBroadcast
+    url = f"{WATI_BASE}/{WATI_ID}/api/v1/broadcast/scheduleBroadcast"
 
     headers = {
-        "Authorization": WATI_ACCESS_TOKEN,
+        "Authorization": WATI_TOKEN,
         "Content-Type": "application/json"
     }
 
-    # ✅ CORRECCIÓN: eliminar "+" ANTES de enviar
-    clean_number = recipient_number.replace("+", "")
-
+    # 🚨 SOLUCIÓN DE PAYLOAD: Usamos el nombre de plantilla aprobada con su parámetro.
     payload = {
-        "template_name": template_name,
-        "parameters": parameters,
+        "template_name": "agenza_bienvenida", # Nombre aprobado en WATI
+        "broadcast_name": f"Agenza_Saludo_{datetime.now().strftime('%H%M%S')}",
+        "parameters": [
+            {"name": "1", "value": param_value} # Parámetro para {{1}} (el nombre)
+        ],
         "receivers": [
-            {"whatsappNumber": clean_number}
-        ]
+            {"whatsappNumber": recipient_number.replace("+", "")}
+        ],
+        "scheduleTime": "now"
     }
 
-    r = requests.post(url, headers=headers, json=payload)
-
-    print("=== DEBUG WATI SEND TEMPLATE ===")
-    print("URL:", url)
-    print("STATUS:", r.status_code)
-    print("BODY:", r.text)
-    print("PAYLOAD:", payload)
-    print("=================================")
-
     try:
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        
+        print("=== DEBUG TEMPLATE SEND ===")
+        print("URL:", url)
+        print("STATUS:", r.status_code)
+        print("BODY:", r.text)
+        print("===========================")
+        
         r.raise_for_status()
-        print("✅ WATI: Plantilla enviada correctamente.")
+        print("✅ ÉXITO WATI: Plantilla enviada correctamente.")
+        
     except Exception as e:
-        print("❌ ERROR enviando plantilla:", e)
+        print(f"❌ ERROR CRÍTICO enviando plantilla: {e}")
 
 
-# =======================================
-# ✅ EXTRACCIÓN DEL MENSAJE ENTRANTE
-# =======================================
-
+# ======================================================
+# ✅ EXTRAER MENSAJE DESDE WATI
+# ======================================================
 def extract_message_info(data):
-    if data.get("type") == "text":
+    """Extrae la información del mensaje entrante del JSON de WATI."""
+    if "type" in data and data.get("type") == "text":
         return {
             "sender": "+" + data.get("waId", ""),
             "text": data.get("text", "").strip()
@@ -89,99 +91,76 @@ def extract_message_info(data):
     return None
 
 
-# =======================================
-# ✅ VERIFICACIÓN DEL WEBHOOK
-# =======================================
-
+# ======================================================
+# ✅ ENDPOINT GET – VERIFICACIÓN DE WEBHOOK
+# ======================================================
 @app.get("/webhook")
 def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
+    try:
+        mode = request.query_params.get("hub.mode")
+        token = request.query_params.get("hub.verify_token")
+        challenge = request.query_params.get("hub.challenge")
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("✅ WEBHOOK VERIFICADO")
-        return int(challenge)
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("✅ WEBHOOK VERIFICADO")
+            return int(challenge)
 
-    raise HTTPException(status_code=403, detail="Token incorrecto")
+        raise HTTPException(status_code=403, detail="Token incorrecto")
+
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# =======================================
-# ✅ LÓGICA DEL BOT
-# =======================================
-
+# ======================================================
+# ✅ ENDPOINT POST – RECEPCIÓN DE MENSAJES (MÁQUINA DE ESTADOS)
+# ======================================================
 @app.post("/webhook")
 async def handle_whatsapp_messages(request: Request):
     data = await request.json()
-
-    print("==== RAW WEBHOOK ====")
-    print(data)
-    print("=====================")
+    
+    # Imprimir el cuerpo del webhook entrante para diagnóstico (no lo haremos aquí para no saturar)
+    # print(data)
 
     info = extract_message_info(data)
-
     if not info:
         return {"status": "ignored"}
 
     sender = info["sender"]
-    text = info["text"].lower()
+    text = info["text"].lower().strip()
+
+    # Estado actual del usuario
     state = user_sessions.get(sender, {"state": "INICIO"})["state"]
+    
+    # 🚨 El nombre del paciente para la plantilla (asumimos un valor por defecto si no lo tenemos)
+    nombre_paciente_temp = "Erick" 
 
-    # Nombre temporal (en el futuro se obtiene desde BD o WATI)
-    nombre = "Erick"
-
-    # ---------------------------------------
-    # ✅ ESTADO INICIO
-    # ---------------------------------------
+    # ===========================================
+    # ✅ LÓGICA DE ESTADOS - INICIO
+    # ===========================================
     if state == "INICIO":
-
-        # Parámetros de la plantilla (según tu planilla aprobada)
-        params = [
-            {"name": "1", "value": nombre}
-        ]
-
-        # 1. Usuario quiere agendar
+        
+        # 1. Si el usuario quiere agendar
         if "agendar" in text or "hora" in text:
             user_sessions[sender] = {"state": "PREGUNTANDO_FECHA"}
+            # Enviamos la plantilla de bienvenida para dar el primer paso
+            send_template_message(sender, "agenza_bienvenida", nombre_paciente_temp)
+            return {"status": "ok"}
 
-            send_template_message(
-                recipient_number=sender,
-                template_name="agenza_inicio",
-                parameters=params
-            )
-
-            return {"status": "inicio_agendar"}
-
-        # 2. Usuario quiere cancelar
+        # 2. Si el usuario quiere cancelar
         if "cancelar" in text or "anular" in text:
             user_sessions[sender] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
+            send_template_message(sender, "agenza_bienvenida", nombre_paciente_temp)
+            return {"status": "ok"}
 
-            send_template_message(
-                recipient_number=sender,
-                template_name="agenza_inicio",
-                parameters=params
-            )
+        # 3. Respuesta por defecto o Saludo (Siempre con plantilla)
+        send_template_message(sender, "agenza_bienvenida", nombre_paciente_temp)
+        return {"status": "template_sent_bienvenida"}
 
-            return {"status": "inicio_cancelar"}
-
-        # 3. Usuario solo saluda
-        send_template_message(
-            recipient_number=sender,
-            template_name="agenza_inicio",
-            parameters=params
-        )
-
-        return {"status": "inicio"}
-
-    # ---------------------------------------
-    # ✅ OTRO ESTADO: PREGUNTANDO_FECHA
-    # ---------------------------------------
-    if state == "PREGUNTANDO_FECHA":
-        send_template_message(
-            recipient_number=sender,
-            template_name="agenza_inicio",
-            parameters=[{"name": "1", "value": nombre}]
-        )
-        return {"status": "fecha_recibida"}
+    # ===========================================
+    # ✅ LÓGICA DE ESTADOS RESTANTE (Resumida, pero asume las funciones de BD)
+    # ===========================================
+    
+    # NOTA: Los otros estados de la Máquina (PREGUNTANDO_FECHA, CANCELAR_RUT, etc.) 
+    # deben ser actualizados para usar send_template_message con plantillas específicas para cada paso.
 
     return {"status": "ok"}
