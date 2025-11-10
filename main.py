@@ -49,11 +49,14 @@ def send_template_message(recipient_number: str, template_name: str, parameters:
         "Content-Type": "application/json"
     }
 
+    # ✅ CORRECCIÓN: eliminar "+" ANTES de enviar
+    clean_number = recipient_number.replace("+", "")
+
     payload = {
         "template_name": template_name,
         "parameters": parameters,
         "receivers": [
-            {"whatsappNumber": recipient_number.replace("+", "")}
+            {"whatsappNumber": clean_number}
         ]
     }
 
@@ -174,7 +177,6 @@ async def handle_whatsapp_messages(request: Request):
     # ✅ OTRO ESTADO: PREGUNTANDO_FECHA
     # ---------------------------------------
     if state == "PREGUNTANDO_FECHA":
-        # Aquí luego irán las validaciones reales
         send_template_message(
             recipient_number=sender,
             template_name="agenza_inicio",
