@@ -15,7 +15,7 @@ from db_service import (
 )
 
 # ================================
-# CONFIG GLOBAL
+# ✅ CONFIG GLOBAL
 # ================================
 app = FastAPI()
 
@@ -25,14 +25,16 @@ MEDICO_PILOTO_ID = 1
 # Sesiones por usuario
 user_sessions: Dict[str, Any] = {}
 
-
-# ======================================================
-# ✅ FUNCIÓN PARA ENVIAR PLANTILLAS DE WATI (V1 /broadcast)
-# ======================================================
+# ================================
+# ✅ FUNCIÓN PARA ENVIAR PLANTILLAS WATI
+# ================================
 def send_template_message(recipient_number: str, template_name: str, parameters: List[Dict[str, str]]):
+    """
+    Envía una Plantilla Aprobada usando el endpoint LEGACY /broadcast/scheduleBroadcast.
+    Requiere programar al menos 60 segundos en el futuro.
+    """
 
-    # Variables EXACTAS configuradas en Railway
-    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")  # https://live-mt-server.wati.io
+    WATI_BASE_ENDPOINT = os.getenv("WATI_ENDPOINT_BASE")
     WATI_ACCESS_TOKEN = os.getenv("WATI_ACCESS_TOKEN")
     WATI_ACCOUNT_ID = os.getenv("WATI_ACCOUNT_ID")
 
@@ -40,7 +42,6 @@ def send_template_message(recipient_number: str, template_name: str, parameters:
         print("❌ ERROR: Variables WATI no configuradas.")
         return
 
-    # Endpoint requerido por WATI
     url = f"{WATI_BASE_ENDPOINT}/{WATI_ACCOUNT_ID}/api/v1/broadcast/scheduleBroadcast"
 
     headers = {
@@ -48,8 +49,8 @@ def send_template_message(recipient_number: str, template_name: str, parameters:
         "Content-Type": "application/json"
     }
 
-    # ✅ Programar el envío 10 segundos en el futuro
-    schedule_time = (datetime.now(timezone.utc) + timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ✅ WATI exige mínimo 60 segundos desde ahora
+    schedule_time = (datetime.now(timezone.utc) + timedelta(seconds=65)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     payload = {
         "TemplateName": template_name,
@@ -77,24 +78,21 @@ def send_template_message(recipient_number: str, template_name: str, parameters:
     except Exception as e:
         print(f"❌ ERROR enviando plantilla: {e}")
 
-
-# ======================================================
+# ================================
 # ✅ EXTRAER MENSAJE DESDE WATI
-# ======================================================
+# ================================
 def extract_message_info(data):
-    """Extrae la información del mensaje entrante del JSON de WATI."""
+    """Extrae la información relevante del mensaje entrante de WATI."""
     if "type" in data and data.get("type") == "text":
         return {
             "sender": "+" + data.get("waId", ""),
-            "text": data.get("text", "").strip(),
-            "sender_name": data.get("senderName", "Paciente")
+            "text": data.get("text", "").strip()
         }
     return None
 
-
-# ======================================================
-# ✅ ENDPOINT GET – VERIFICACIÓN DE WEBHOOK
-# ======================================================
+# ================================
+# ✅ VERIFICACIÓN DEL WEBHOOK (GET)
+# ================================
 @app.get("/webhook")
 def verify_webhook(request: Request):
     try:
@@ -111,10 +109,9 @@ def verify_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
-
-# ======================================================
-# ✅ ENDPOINT POST – RECEPCIÓN DE MENSAJES (MÁQUINA DE ESTADOS)
-# ======================================================
+# ================================
+# ✅ WEBHOOK PRINCIPAL (POST)
+# ================================
 @app.post("/webhook")
 async def handle_whatsapp_messages(request: Request):
     data = await request.json()
@@ -125,50 +122,47 @@ async def handle_whatsapp_messages(request: Request):
 
     info = extract_message_info(data)
 
-    # Si el mensaje no es texto o no se puede leer
+    # Si no es texto → ignorar
     if not info:
         return {"status": "ignored"}
 
     sender = info["sender"]
-    sender_name = info["sender_name"] or "Paciente"
     text = info["text"].lower().strip()
 
-    # Obtener estado actual
+    # Estado actual
     state = user_sessions.get(sender, {"state": "INICIO"})["state"]
 
-    # ===========================================
-    # ✅ LÓGICA DE ESTADOS - INICIO
-    # ===========================================
+    # Nombre temporal (en piloto)
+    nombre_paciente_temp = data.get("senderName", "Paciente")
+
+    # ========================
+    # ✅ ESTADO INICIAL
+    # ========================
     if state == "INICIO":
 
-        # Parámetros para la plantilla (solo un parámetro {{1}})
-        template_params = [
-            {"name": "1", "value": sender_name}
-        ]
+        template_params = [{"name": "1", "value": nombre_paciente_temp}]
 
-        # ---- Usuario quiere agendar ----
+        # Si quiere agendar
         if "agendar" in text or "hora" in text:
             user_sessions[sender] = {"state": "PREGUNTANDO_FECHA"}
             send_template_message(sender, "agenza_inicio", template_params)
             return {"status": "iniciado_agendamiento"}
 
-        # ---- Usuario quiere cancelar ----
-        if "cancelar" in text or "anular" in text:
+        # Si quiere cancelar
+        if "cancelar" in text:
             user_sessions[sender] = {"state": "PREGUNTANDO_CANCELAR_RUT"}
             send_template_message(sender, "agenza_inicio", template_params)
             return {"status": "iniciado_cancelacion"}
 
-        # ---- Saludo genérico ----
+        # Saludos u otras entradas → enviar plantilla de bienvenida
         send_template_message(sender, "agenza_inicio", template_params)
         return {"status": "template_sent_bienvenida"}
 
-    # ===========================================
-    # ✅ ESTADO: PREGUNTANDO_FECHA (simplificado por ahora)
-    # ===========================================
+    # ========================
+    # ✅ ESTADO DE AGENDAMIENTO
+    # ========================
     if state == "PREGUNTANDO_FECHA":
-        send_template_message(sender, "agenza_inicio", [
-            {"name": "1", "value": sender_name}
-        ])
+        send_template_message(sender, "agenza_inicio", [{"name": "1", "value": nombre_paciente_temp}])
         return {"status": "ok_date_received"}
 
     return {"status": "ok"}
