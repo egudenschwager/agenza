@@ -1,97 +1,67 @@
-# main.py → Chatbot WhatsApp Citas Médicas 2025 (YCloud + Railway)
+# main.py → YCLOUD 100% FUNCIONAL NOVIEMBRE 2025
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 import os
-import hmac
-import hashlib
-from loguru import logger
 import requests
 from datetime import datetime
-from db_service import obtener_lista_medicos, consultar_disponibilidad, reservar_cita
-from dateutil import parser
 import pytz
+from loguru import logger
 
-app = FastAPI(title="Chatbot Citas Médicas WhatsApp")
+app = FastAPI()
 
-# ==============================================================
-# CONFIGURACIÓN YCLOUD
-# ==============================================================
+# Variables YCloud
+API_KEY = os.getenv("YCLOUD_API_KEY")
+PHONE_ID = os.getenv("YCLOUD_PHONE_ID")
+VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "clinica2025")
 
-YCLOUD_API_KEY = os.getenv("YCLOUD_API_KEY")
-YCLOUD_PHONE_ID = os.getenv("YCLOUD_PHONE_ID")  # ej: 113452XXXXXX
-WEBHOOK_VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "mi_token_secreto_2025")
+tz = pytz.timezone("America/Santiago")
 
-CHILE_TZ = pytz.timezone("America/Santiago")
+@app.get("/")
+async def home():
+    return {
+        "status": "Bot activo con YCloud",
+        "hora_chile": datetime.now(tz).strftime("%d-%m-%Y %H:%M"),
+        "provider": "YCloud"
+    }
 
-# ==============================================================
-# WEBHOOK VERIFICACIÓN (GET)
-# ==============================================================
-
+# Verificación del webhook
 @app.get("/webhook")
-async def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
+async def verify(request: Request):
+    if (request.query_params.get("hub.mode") == "subscribe" and
+        request.query_params.get("hub.verify_token") == VERIFY_TOKEN):
+        return PlainTextResponse(request.query_params.get("hub.challenge"))
+    raise HTTPException(status_code=403)
 
-    if mode == "subscribe" and token == WEBHOOK_VERIFY_TOKEN:
-        logger.info("Webhook verificado correctamente")
-        return PlainTextResponse(content=challenge)
-    raise HTTPException(status_code=403, detail="Forbidden")
-
-# ==============================================================
-# WEBHOOK RECEPCIÓN MENSAJES (POST)
-# ==============================================================
-
+# Recepción de mensajes
 @app.post("/webhook")
-async def receive_message(request: Request):
-    body = await request.json()
-    
-    # Verificar firma (seguridad YCloud)
-    signature = request.headers.get("X-YCloud-Signature")
-    if signature:
-        expected = hmac.new(YCLOUD_API_KEY.encode(), await request.body(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise HTTPException(status_code=401)
+async def webhook(request: Request):
+    data = await request.json()
 
-    # Procesar mensajes
-    if "messages" in body:
-        for message in body["messages"]:
-            from_number = message["from"]
-            text = message.get("text", {}).get("body", "").strip().lower()
+    if "messages" in data:
+        for msg in data["messages"]:
+            telefono = msg["from"]
+            texto = msg.get("text", {}).get("body", "").lower()
 
-            # Aquí va tu lógica de conversación (estado en DB o Redis)
-            # Por ahora, ejemplo simple de saludo + menú
-            if any(saludo in text for saludo in ["hola", "buenas", "hi"]):
-                await enviar_mensaje_texto(from_number, 
-                    "¡Hola! 👋 Bienvenido(a) a Clínica Sonrisas Perfectas\n\n¿Qué deseas hacer?\n1️⃣ Agendar cita\n2️⃣ Ver mis citas\n3️⃣ Cancelar cita")
-    
-    return JSONResponse({"status": "ok"})
+            # Respuesta automática de prueba
+            await enviar_mensaje(telefono,
+                "¡Hola! Bienvenido(a)\n\nTu bot de citas médicas/odontológicas ya está funcionando 100% con YCloud\n\nEn breve tendrás el menú completo para agendar 24/7")
 
-# ==============================================================
-# ENVIAR MENSAJE WHATSAPP (función reutilizable)
-# ==============================================================
+    return {"status": "ok"}
 
-async def enviar_mensaje_texto(to: str, texto: str):
-    url = f"https://api.ycloud.com/v2/api/whatsapp/{YCLOUD_PHONE_ID}/messages"
+# Función para enviar mensajes
+async def enviar_mensaje(to: str, texto: str):
+    url = f"https://api.ycloud.com/v2/api/whatsapp/{PHONE_ID}/messages"
     payload = {
         "to": to,
         "type": "text",
         "text": {"body": texto}
     }
     headers = {
-        "Authorization": f"Bearer {YCLOUD_API_KEY}",
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
     try:
         requests.post(url, json=payload, headers=headers, timeout=10)
     except Exception as e:
-        logger.error(f"Error enviando mensaje a {to}: {e}")
-
-# ==============================================================
-# HEALTH CHECK
-# ==============================================================
-
-@app.get("/")
-async def root():
-    return {"status": "Chatbot citas médicas activo 24/7", "hora_chile": datetime.now(CHILE_TZ).strftime("%Y-%m-%d %H:%M")}
+        logger.error(f"Error enviando mensaje: {e}")
