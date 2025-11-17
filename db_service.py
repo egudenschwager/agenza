@@ -1,161 +1,123 @@
-# db_service.py
-import psycopg2
-from psycopg2 import extras
-from psycopg2 import pooling # Se mantiene pooling si se usa
+# db_service.py → VERSIÓN 2025 PRODUCCIÓN (FastAPI + Supabase + Railway)
+
 import os
-from datetime import date, timedelta
+from psycopg_pool import ConnectionPool
+from contextlib import contextmanager
+from datetime import date
 from typing import List, Dict, Any
 
 # ============================================
-# ✅ CONEXIÓN GLOBAL A POSTGRESQL (SUPABASE)
+# CONEXIÓN CON POOL MODERNO (psycopg 3)
 # ============================================
 
-# La URI se lee directamente de la variable de entorno de Railway/Supabase
-SUPABASE_URI = os.getenv("SUPABASE_URI")
+DATABASE_URL = os.getenv("SUPABASE_URI")  # o DATABASE_URL, como prefieras
 
-# Nota: En entornos como Railway, a menudo es mejor usar psycopg2.connect(SUPABASE_URI) 
-# directamente dentro de cada función, ya que el pooling lo maneja el proveedor cloud.
-# Mantenemos la lógica de conexión directa por la URL para evitar problemas de configuración.
+if not DATABASE_URL:
+    raise ValueError("Falta SUPABASE_URI en variables de entorno")
 
+# Pool global (psycopg 3 – el estándar actual)
+pool = ConnectionPool(
+    conninfo=DATABASE_URL,
+    min_size=2,
+    max_size=20,
+    timeout=30.0,
+    kwargs={
+        "connect_timeout": 10,
+        "options": "-c statement_timeout=20000"
+    }
+)
 
-def get_connection():
-    """Obtiene una nueva conexión de PostgreSQL usando la URI de Supabase."""
-    if not SUPABASE_URI:
-        raise ValueError("SUPABASE_URI no está configurada.")
-    return psycopg2.connect(SUPABASE_URI)
+@contextmanager
+def get_db():
+    conn = pool.getconn()
+    try:
+        yield conn
+    finally:
+        pool.putconn(conn)
 
 
 # ============================================
-# ✅ 1. LISTAR MÉDICOS (Multi-Médico)
+# 1. LISTAR MÉDICOS
 # ============================================
 
 def obtener_lista_medicos() -> List[Dict[str, Any]]:
-    """
-    Obtiene la lista de médicos disponibles para el menú inicial.
-    """
-    conn = None
     try:
-        conn = get_connection()
-        # Usamos DictCursor para obtener resultados como diccionarios (similar a dictionary=True en MySQL)
-        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
-
-        query = """
-        SELECT 
-            id_medico, 
-            nombre, 
-            especialidad 
-        FROM 
-            medicos
-        ORDER BY 
-            especialidad, nombre;
-        """
-        cursor.execute(query)
-        return cursor.fetchall()
-
+        with get_db() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:  # dict_row viene de psycopg
+                cur.execute("""
+                    SELECT id_medico, nombre, especialidad 
+                    FROM medicos 
+                    ORDER BY especialidad, nombre;
+                """)
+                return cur.fetchall()
     except Exception as e:
-        print("❌ Error en obtener_lista_medicos:", e)
+        print("Error obtener_lista_medicos:", e)
         return []
-
-    finally:
-        if conn:
-            cursor.close()
-            conn.close()
 
 
 # ============================================
-# ✅ 2. CONSULTAR DISPONIBILIDAD
+# 2. CONSULTAR DISPONIBILIDAD
 # ============================================
 
 def consultar_disponibilidad(id_medico: int, fecha: date) -> List[Dict[str, Any]]:
-    """
-    Retorna una lista de bloques de horas DISPONIBLES para un médico en una fecha.
-    """
-    conn = None
     try:
-        conn = get_connection()
-        cursor = conn.cursor(cursor_factory=extras.RealDictCursor)
-
-        query = """
-        SELECT 
-            id_bloque, 
-            TO_CHAR(hora_inicio, 'HH24:MI') AS hora_str 
-        FROM 
-            bloques_disponibles 
-        WHERE 
-            medico_id = %s 
-            AND fecha = %s 
-            AND estado = 'DISPONIBLE'
-        ORDER BY 
-            hora_inicio ASC;
-        """
-        cursor.execute(query, (id_medico, fecha))
-        return cursor.fetchall()
-
+        with get_db() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("""
+                    SELECT id_bloque, TO_CHAR(hora_inicio, 'HH24:MI') AS hora_str 
+                    FROM bloques_disponibles 
+                    WHERE medico_id = %s AND fecha = %s AND estado = 'DISPONIBLE'
+                    ORDER BY hora_inicio;
+                """, (id_medico, fecha))
+                return cur.fetchall()
     except Exception as e:
-        print("❌ Error en consultar_disponibilidad:", e)
+        print("Error consultar_disponibilidad:", e)
         return []
 
-    finally:
-        if conn:
-            cursor.close()
-            conn.close()
-
 
 # ============================================
-# ✅ 3. RESERVAR UNA CITA (TRANSACCIÓN ATÓMICA)
+# 3. RESERVAR CITA (TRANSACCIÓN SEGURA)
 # ============================================
+
+from psycopg.rows import dict_row  # ← IMPORTANTE: agregar esta línea al inicio
 
 def reservar_cita(id_bloque: int, rut: str, nombre_completo: str, telefono: str, id_medico: int) -> bool:
-    """
-    Ejecuta una transacción ATÓMICA: 1. Inserta/Actualiza Paciente. 
-    2. Reserva el bloque (solo si está 'DISPONIBLE'). 3. Registra la cita.
-    """
-    conn = None
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # 1. Paciente (upsert)
+                cur.execute("""
+                    INSERT INTO pacientes (rut, nombre_completo, telefono_wsp)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (rut) DO UPDATE SET
+                        nombre_completo = EXCLUDED.nombre_completo,
+                        telefono_wsp = EXCLUDED.telefono_wsp
+                    RETURNING id_paciente;
+                """, (rut, nombre_completo, telefono))
+                paciente_id = cur.fetchone()[0]
 
-        # 1. Insertar/Actualizar Paciente (ON CONFLICT DO UPDATE)
-        # Esto es crucial para manejar pacientes recurrentes
-        cursor.execute("""
-            INSERT INTO pacientes (rut, nombre_completo, telefono_wsp)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (rut) DO UPDATE
-            SET nombre_completo = EXCLUDED.nombre_completo, telefono_wsp = EXCLUDED.telefono_wsp
-            RETURNING id_paciente;
-        """, (rut, nombre_completo, telefono))
-        paciente_id = cursor.fetchone()[0]
+                # 2. Reservar bloque (solo si sigue disponible)
+                cur.execute("""
+                    UPDATE bloques_disponibles
+                    SET estado = 'RESERVADO', paciente_id = %s
+                    WHERE id_bloque = %s AND estado = 'DISPONIBLE';
+                """, (paciente_id, id_bloque))
 
-        # 2. Intentar reservar el Bloque (Bloqueo Optimista: solo si es DISPONIBLE)
-        cursor.execute("""
-            UPDATE bloques_disponibles
-            SET estado = 'RESERVADO', paciente_id = %s
-            WHERE id_bloque = %s AND estado = 'DISPONIBLE';
-        """, (paciente_id, id_bloque))
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    return False
 
-        if cursor.rowcount == 0:
-            conn.rollback()  # Bloque ya fue tomado, revertir paso 1
-            return False
+                # 3. Registrar cita
+                cur.execute("""
+                    INSERT INTO citas_agendadas (bloque_id, paciente_id, medico_id, estado_cita)
+                    VALUES (%s, %s, %s, 'CONFIRMADA');
+                """, (id_bloque, paciente_id, id_medico))
 
-        # 3. Registrar la Cita en el historial
-        cursor.execute("""
-            INSERT INTO citas_agendadas (bloque_id, paciente_id, medico_id, estado_cita)
-            VALUES (%s, %s, %s, 'CONFIRMADA');
-        """, (id_bloque, paciente_id, id_medico))
-
-        conn.commit()
-        return True
+                conn.commit()
+                return True
 
     except Exception as e:
-        print("❌ Error en reservar_cita:", e)
-        if conn:
+        print("Error reservar_cita:", e)
+        if 'conn' in locals():
             conn.rollback()
         return False
-
-    finally:
-        if conn:
-            cursor.close()
-            conn.close()
-
-# --- NOTA: Las funciones de cancelación (4 y 5) también deben ser actualizadas 
-# para usar el esquema bloques_disponibles/citas_agendadas de PostgreSQL.
