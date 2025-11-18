@@ -5,7 +5,6 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 import os
 import requests
 from datetime import datetime, date
-from dateutil import parser
 import pytz
 from loguru import logger
 from db_service import obtener_lista_medicos, consultar_disponibilidad, reservar_cita
@@ -143,7 +142,7 @@ async def webhook(request: Request):
             await set_estado(telefono, {"estado": "inicio"})
 
         elif estado["estado"] == "ver_citas":
-            # Simula ver citas (agrega consulta real aquí si quieres)
+            # Aquí puedes agregar consulta real a Neon
             await enviar_mensaje(telefono, "Para ver citas, envía tu RUT (ej: 12.345.678-9)")
             await set_estado(telefono, {"estado": "menu"})
 

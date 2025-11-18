@@ -1,0 +1,5 @@
+[phases.setup]
+nixPkgs = ['python313']
+
+[phases.build]
+nixPkgs = ['python313']
