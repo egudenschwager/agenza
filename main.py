@@ -1,4 +1,4 @@
-# main.py → FLUJO COMPLETO CON NEON 2025 (YCloud + Railway + Neon DB)
+# main.py → FLUJO COMPLETO NEON 2025 (YCloud + Railway + Neon DB)
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -18,7 +18,7 @@ PHONE_ID = os.getenv("YCLOUD_PHONE_ID")
 VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "clinica2025")
 CHILE_TZ = pytz.timezone("America/Santiago")
 
-# ====================== ESTADO EN MEMORIA (simple, sin DB extra) ======================
+# ====================== ESTADO EN MEMORIA ======================
 conversaciones = {}
 
 # ====================== ENVIAR MENSAJE ======================
@@ -76,7 +76,7 @@ async def webhook(request: Request):
                 await enviar_mensaje(telefono, respuesta)
                 await set_estado(telefono, {"estado": "elegir_medico", "medicos": medicos})
             elif "2" in texto:
-                await enviar_mensaje(telefono, "Para ver tus citas, envía tu RUT (ej: 12.345.678-9)")
+                await enviar_mensaje(telefono, "Para ver citas, envía tu RUT (ej: 12.345.678-9)")
                 await set_estado(telefono, {"estado": "ver_citas"})
             else:
                 await enviar_mensaje(telefono, "Opción no válida. Escribe 1 para agendar.")
@@ -143,7 +143,7 @@ async def webhook(request: Request):
             await set_estado(telefono, {"estado": "inicio"})
 
         elif estado["estado"] == "ver_citas":
-            # Simula ver citas (puedes agregar consulta real aquí)
+            # Simula ver citas (agrega consulta real aquí si quieres)
             await enviar_mensaje(telefono, "Para ver citas, envía tu RUT (ej: 12.345.678-9)")
             await set_estado(telefono, {"estado": "menu"})
 
