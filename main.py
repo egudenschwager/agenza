@@ -1,4 +1,4 @@
-# main.py → VERSIÓN BÁSICA FUNCIONANDO (YCloud + Railway – sin DB)
+# main.py → ROLLBACK FUNCIONANDO (YCloud + Railway – flujo básico sin DB)
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -16,7 +16,7 @@ PHONE_ID = os.getenv("YCLOUD_PHONE_ID")
 VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "clinica2025")
 CHILE_TZ = pytz.timezone("America/Santiago")
 
-# ====================== ESTADO SIMPLE (en memoria, sin DB) ======================
+# ====================== ESTADO SIMPLE (en memoria) ======================
 conversaciones = {}
 
 # ====================== ENVIAR MENSAJE ======================
@@ -59,13 +59,16 @@ async def webhook(request: Request):
             if "1" in texto:
                 await enviar_mensaje(telefono, "Para agendar:\n• Elige médico: Dr. Pérez (Odontología) o Dra. López (Ortodoncia)\n• Fecha: DD-MM-YYYY\n• Hora: 9:00, 10:00, etc.\n\nEjemplo: 'Dr. Pérez 20-11-2025 10:00'")
                 conversaciones[telefono] = {"estado": "agendar"}
+            elif "2" in texto:
+                await enviar_mensaje(telefono, "Horarios disponibles:\n• Lunes a Viernes: 9:00 - 18:00\n• Sábados: 9:00 - 14:00\n\nEscribe 1 para agendar.")
+                conversaciones[telefono] = {"estado": "inicio"}
             else:
                 await enviar_mensaje(telefono, "Opción no válida. Escribe 1 para agendar.")
                 conversaciones[telefono] = {"estado": "inicio"}
 
         elif estado["estado"] == "agendar":
             # Simula reserva (sin DB – responde confirmación)
-            await enviar_mensaje(telefono, f"¡Cita agendada! {texto}\n\nTe esperamos. 😊\nDirección: Av. Ejemplo 123, Santiago")
+            await enviar_mensaje(telefono, f"¡Cita agendada! {texto}\n\nTe esperamos. 😊\nDirección: Av. Ejemplo 123, Santiago\nTel: +56 9 1234 5678")
             conversaciones[telefono] = {"estado": "inicio"}
 
         else:
