@@ -1,12 +1,14 @@
-# main.py → ROLLBACK FUNCIONANDO (YCloud + Railway – flujo básico sin DB)
+# main.py → FLUJO COMPLETO CON NEON 2025 (YCloud + Railway + Neon DB)
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, date
+from dateutil import parser
 import pytz
 from loguru import logger
+from db_service import obtener_lista_medicos, consultar_disponibilidad, reservar_cita
 
 app = FastAPI()
 
@@ -16,7 +18,7 @@ PHONE_ID = os.getenv("YCLOUD_PHONE_ID")
 VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "clinica2025")
 CHILE_TZ = pytz.timezone("America/Santiago")
 
-# ====================== ESTADO SIMPLE (en memoria) ======================
+# ====================== ESTADO EN MEMORIA (simple, sin DB extra) ======================
 conversaciones = {}
 
 # ====================== ENVIAR MENSAJE ======================
@@ -29,6 +31,13 @@ async def enviar_mensaje(to: str, texto: str):
         logger.success(f"Enviado a {to}")
     except Exception as e:
         logger.error(f"Error enviando: {e}")
+
+# ====================== GET/SET ESTADO ======================
+async def get_estado(telefono: str):
+    return conversaciones.get(telefono, {"estado": "inicio"})
+
+async def set_estado(telefono: str, datos: dict):
+    conversaciones[telefono] = datos
 
 # ====================== WEBHOOK ======================
 @app.get("/webhook")
@@ -47,33 +56,96 @@ async def webhook(request: Request):
         telefono = msg["from"]
         texto = msg.get("text", {}).get("body", "").strip().lower()
 
-        # Estado simple en memoria
-        estado = conversaciones.get(telefono, {"estado": "inicio"})
+        estado = await get_estado(telefono)
 
-        # FLUJO BÁSICO (sin DB – responde siempre)
+        # FLUJO COMPLETO CON NEON DB
         if estado["estado"] == "inicio":
-            await enviar_mensaje(telefono, "¡Hola! 👋 Bienvenido(a) a *Clínica Sonrisas*\n\n¿Qué deseas?\n1️⃣ Agendar cita\n2️⃣ Ver horarios\n3️⃣ Contacto")
-            conversaciones[telefono] = {"estado": "menu"}
+            await enviar_mensaje(telefono, "¡Hola! Bienvenido(a) a *Clínica Sonrisas*\n\n¿Qué deseas?\n1️⃣ Agendar cita\n2️⃣ Ver mis citas\n3️⃣ Cancelar cita")
+            await set_estado(telefono, {"estado": "menu"})
 
         elif estado["estado"] == "menu":
             if "1" in texto:
-                await enviar_mensaje(telefono, "Para agendar:\n• Elige médico: Dr. Pérez (Odontología) o Dra. López (Ortodoncia)\n• Fecha: DD-MM-YYYY\n• Hora: 9:00, 10:00, etc.\n\nEjemplo: 'Dr. Pérez 20-11-2025 10:00'")
-                conversaciones[telefono] = {"estado": "agendar"}
+                medicos = obtener_lista_medicos()
+                if not medicos:
+                    await enviar_mensaje(telefono, "Lo siento, no hay médicos disponibles ahora.")
+                    return
+                respuesta = "Elige tu médico:\n\n"
+                for i, m in enumerate(medicos, 1):
+                    respuesta += f"{i}️⃣ Dr(a). {m['nombre']} - {m['especialidad']}\n"
+                respuesta += "\nEscribe solo el número 👆"
+                await enviar_mensaje(telefono, respuesta)
+                await set_estado(telefono, {"estado": "elegir_medico", "medicos": medicos})
             elif "2" in texto:
-                await enviar_mensaje(telefono, "Horarios disponibles:\n• Lunes a Viernes: 9:00 - 18:00\n• Sábados: 9:00 - 14:00\n\nEscribe 1 para agendar.")
-                conversaciones[telefono] = {"estado": "inicio"}
+                await enviar_mensaje(telefono, "Para ver tus citas, envía tu RUT (ej: 12.345.678-9)")
+                await set_estado(telefono, {"estado": "ver_citas"})
             else:
                 await enviar_mensaje(telefono, "Opción no válida. Escribe 1 para agendar.")
-                conversaciones[telefono] = {"estado": "inicio"}
 
-        elif estado["estado"] == "agendar":
-            # Simula reserva (sin DB – responde confirmación)
-            await enviar_mensaje(telefono, f"¡Cita agendada! {texto}\n\nTe esperamos. 😊\nDirección: Av. Ejemplo 123, Santiago\nTel: +56 9 1234 5678")
-            conversaciones[telefono] = {"estado": "inicio"}
+        elif estado["estado"] == "elegir_medico":
+            try:
+                idx = int(texto) - 1
+                medico = estado["medicos"][idx]
+                await enviar_mensaje(telefono, f"Perfecto, Dr(a). {medico['nombre']}\n\n¿Para qué fecha? (ej: 20-11-2025)")
+                await set_estado(telefono, {"estado": "elegir_fecha", "medico_id": medico["id_medico"], "medico_nombre": medico["nombre"]})
+            except:
+                await enviar_mensaje(telefono, "Número inválido. Escribe solo el número del médico.")
 
-        else:
-            await enviar_mensaje(telefono, "¡Hola! Escribe '1' para agendar cita.")
-            conversaciones[telefono] = {"estado": "inicio"}
+        elif estado["estado"] == "elegir_fecha":
+            try:
+                fecha = datetime.strptime(texto, "%d-%m-%Y").date()
+                if fecha < date.today():
+                    await enviar_mensaje(telefono, "Fecha inválida. Elige una fecha futura.")
+                    return
+                bloques = consultar_disponibilidad(estado["medico_id"], fecha)
+                if not bloques:
+                    await enviar_mensaje(telefono, "No hay horarios disponibles esa fecha. Elige otra.")
+                    return
+                respuesta = f"Horarios disponibles {texto}:\n\n"
+                for i, b in enumerate(bloques, 1):
+                    respuesta += f"{i}️⃣ {b['hora_str']}\n"
+                respuesta += "\nEscribe solo el número del horario"
+                await enviar_mensaje(telefono, respuesta)
+                await set_estado(telefono, {**estado, "estado": "elegir_hora", "fecha": fecha, "bloques": bloques})
+            except:
+                await enviar_mensaje(telefono, "Formato inválido. Usa DD-MM-YYYY")
+
+        elif estado["estado"] == "elegir_hora":
+            try:
+                idx = int(texto) - 1
+                bloque = estado["bloques"][idx]
+                await enviar_mensaje(telefono, "Perfecto. Ahora dime:\n\n• Nombre completo\n• RUT (ej: 12.345.678-9)")
+                await set_estado(telefono, {**estado, "estado": "datos_paciente", "bloque_id": bloque["id_bloque"]})
+            except:
+                await enviar_mensaje(telefono, "Número inválido.")
+
+        elif estado["estado"] == "datos_paciente":
+            lineas = [l.strip() for l in texto.split("\n") if l.strip()]
+            if len(lineas) < 2:
+                await enviar_mensaje(telefono, "Faltan datos. Nombre y RUT por favor.")
+                return
+            nombre = lineas[0]
+            rut = lineas[1].replace(".", "").replace("-", "").lower()
+            if not rut[:-1].isdigit() or len(rut) < 8:
+                await enviar_mensaje(telefono, "RUT inválido. Ejemplo: 12345678-9")
+                return
+
+            exito = reservar_cita(
+                id_bloque=estado["bloque_id"],
+                rut=rut,
+                nombre_completo=nombre,
+                telefono=telefono,
+                id_medico=estado["medico_id"]
+            )
+            if exito:
+                await enviar_mensaje(telefono, f"¡CITA CONFIRMADA! 🎉\n\nDr(a). {estado['medico_nombre']}\nFecha: {estado['fecha'].strftime('%d-%m-%Y')}\nHora: {estado['bloques'][idx]['hora_str']}\nPaciente: {nombre}\n\n¡Te esperamos! 😊\nDirección: Av. Siempre Viva 123, Santiago")
+            else:
+                await enviar_mensaje(telefono, "Lo siento, ese horario ya fue tomado. Elige otro.")
+            await set_estado(telefono, {"estado": "inicio"})
+
+        elif estado["estado"] == "ver_citas":
+            # Simula ver citas (puedes agregar consulta real aquí)
+            await enviar_mensaje(telefono, "Para ver citas, envía tu RUT (ej: 12.345.678-9)")
+            await set_estado(telefono, {"estado": "menu"})
 
     return {"status": "ok"}
 
