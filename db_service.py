@@ -24,7 +24,6 @@ pool = ConnectionPool(
     timeout=30.0,
     kwargs={
         "connect_timeout": 15,
-        "options": "-c statement_timeout=20000"
     }
 )
 
