@@ -1,0 +1,12 @@
+# Entornos virtuales y librerías
+venv/
+__pycache__/
+node_modules/
+
+# Bases de datos y archivos locales
+agenza.db
+*.sqlite3
+
+# Variables de entorno (por si a futuro usas contraseñas)
+.env
+
